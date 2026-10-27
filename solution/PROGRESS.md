@@ -40,9 +40,9 @@ serve; verified live). Multi-key round-robin; Ollama offline fallback intact.
 | 4 | Tools (`tools.py`) | ✅ DONE | Deterministic account/usage/duplicate facts; the agent's only data access. Verified. |
 | 5 | Policy (`policy.py`) | ✅ DONE | Mandatory rules enforced + audit-traced; the correctness edge. Unit-tested. |
 | 6 | Agent loop (`agent.py`) | ✅ DONE (needs live run) | The agentic core (30%): model picks tools, decides when to stop. Written, imports clean, JSON/injection unit-checked. |
-| 7 | Review run → outputs + `run_log.jsonl` | ⏳ BLOCKED on keys | Hard gate: `check_outputs.py` must show **10/10 valid**. Blocked only by Groq TPM; awaiting 5 independent-account keys. |
-| 8 | Eval harness (`scripts/eval.py`) | ✅ DONE | Proves *semantic* correctness with numbers. Rubric ground truth (all 10 account mappings) verified against data. |
-| 9 | `SOLUTION.md` (1 page) | ⬜ PENDING | 20% of score: design, evaluation, 10x scale, limits, how to run. |
+| 7 | Review run → outputs + `run_log.jsonl` | ✅ DONE | **10/10 valid** (`check_outputs.py`). Outputs + run_log committed. |
+| 8 | Eval harness (`scripts/eval.py`) | ✅ DONE | **37/37 checks (100%)** on the review set. Rubric separate from agent; ground truth verified. |
+| 9 | `SOLUTION.md` (1 page) | ✅ DONE | Design, evaluation, 10x scale, limitations, how-to — with real measured numbers. |
 | 10 | *(uplift)* Trace viewer UI | ⬜ OPTIONAL | Not required by the brief; a walkthrough aid, built only after 10/10. |
 
 ---
