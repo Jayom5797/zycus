@@ -1,5 +1,7 @@
 pandas>=2.0
-# Install the SDK for the provider you use:
-# anthropic
-# openai
-# Add any other libraries you use (e.g. langgraph, rank_bm25, sentence-transformers, chromadb).
+
+# LLM access:
+#   Groq (default) and Ollama use the standard library only - no SDK needed.
+#   To use other providers, install the matching SDK and set LLM_PROVIDER:
+#     openai      pip install openai
+#     anthropic   pip install anthropic
