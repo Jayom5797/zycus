@@ -69,6 +69,18 @@ Read directly from `outputs/evaluation.json` and `outputs/run_log.jsonl`:
 > *correct* against a rubric derived from the policy KB, kept separate from the agent so expected
 > answers never leak into decision logic.
 
+**How to read "100%" honestly:**
+- It is **100% on the 10-ticket review set against our rubric** — the scope the task defines —
+  not a general accuracy claim. Ten tickets is a small sample.
+- Accuracy is split between two layers. The **deterministic policy layer** guarantees the hard
+  rules (security → P1, account-risk override, duplicates, P1 ⇒ escalate) *by construction*, so
+  those stay correct even on a weaker model. The **model-driven parts** (which KB to search,
+  category nuance, when to stop) depend on the LLM; `gpt-oss-120b` handled them well.
+- The served model is **non-deterministic**, so a fresh run can vary on a model-dependent check
+  (e.g. a KB citation); the policy-governed critical decisions are stable. During development the
+  same agent scored 68% → 78% → 92% → 95% → 100% as real bugs (empty replies, KB hallucination,
+  premature finalize) were fixed. The committed run is a clean 100%.
+
 ---
 
 ## Architecture
@@ -185,8 +197,12 @@ result can never inflate the score.
 ```
 
 ## Notes & limitations
-- The served model (`openai/gpt-oss-120b`) is non-deterministic; per-ticket step counts vary
-  across runs, but the decisions are stable and correct.
+- The served model (`openai/gpt-oss-120b`) is non-deterministic; per-ticket step counts and
+  model-dependent checks can vary across runs. Critical, policy-governed decisions are stable;
+  the committed run is 100% on the rubric.
+- "100%" is measured on the **10-ticket review set only** — not a production-readiness claim.
+- Accuracy on the model-driven parts depends on the provider. On the offline **Ollama** fallback
+  (a smaller local model) expect lower scores on those parts; the deterministic policy layer still
+  enforces the critical security / override / duplicate rules correctly.
 - `confidence` is an evidence-derived heuristic and is **not** calibrated.
-- Evaluated on the 10 review tickets only — not a production-readiness claim.
 - Any LLM provider works; the agent code is unchanged across providers.
