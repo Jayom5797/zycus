@@ -107,9 +107,14 @@ class KBIndex:
         self.k1, self.b = k1, b
         self.articles = {a["id"]: a for a in kb}
 
-        self._docs: dict[str, list[str]] = {}       # id -> tokens
+        # Precomputed per-doc term frequencies + an inverted index (postings).
+        # The postings list lets search() gather only the documents that share a
+        # query term, instead of scoring the whole corpus - the right structure
+        # for the 10x scale story (score O(candidates) not O(N)).
+        self._tf: dict[str, Counter] = {}            # id -> {token: freq}
         self._df: Counter = Counter()                # token -> doc frequency
         self._len: dict[str, int] = {}               # id -> token count
+        self._postings: dict[str, set[str]] = defaultdict(set)  # token -> {ids}
         self.by_code: dict[str, list[str]] = defaultdict(list)
         self.by_module: dict[str, list[str]] = defaultdict(list)
 
@@ -117,10 +122,12 @@ class KBIndex:
             aid = a["id"]
             meta = a["meta"]
             tokens = _tokenize(f"{meta.get('title', '')} {a.get('body', '')}")
-            self._docs[aid] = tokens
+            tf = Counter(tokens)
+            self._tf[aid] = tf
             self._len[aid] = len(tokens)
-            for tok in set(tokens):
+            for tok in tf:
                 self._df[tok] += 1
+                self._postings[tok].add(aid)
             for code in (meta.get("error_codes") or []):
                 self.by_code[str(code).upper()].append(aid)
             mod = meta.get("module")
@@ -134,10 +141,9 @@ class KBIndex:
     def _bm25(self, query_tokens: list[str], aid: str) -> float:
         if not query_tokens:
             return 0.0
-        doc = self._docs[aid]
-        if not doc:
+        tf = self._tf.get(aid)
+        if not tf:
             return 0.0
-        tf = Counter(doc)
         dl = self._len[aid]
         score = 0.0
         for q in query_tokens:
@@ -185,12 +191,19 @@ class KBIndex:
         canon_mod = normalize_module(module)
         code = (error_code or "").upper().strip() or None
 
-        # Candidate set: strong signals (code/module) union the whole KB for text.
         code_hits = set(self.by_code.get(code, [])) if code else set()
         mod_hits = set(self.by_module.get(canon_mod, [])) if canon_mod else set()
 
+        # Candidate set via the inverted index: only documents that contain a
+        # query term, plus the strong-signal hits (exact code / right module).
+        # This scores O(candidates), not O(N) - the key scaling property.
+        candidates: set[str] = set(code_hits) | set(mod_hits)
+        for q in q_tokens:
+            candidates |= self._postings.get(q, set())
+
         scored = []
-        for aid, art in self.articles.items():
+        for aid in candidates:
+            art = self.articles[aid]
             meta = art["meta"]
             status = meta.get("status", "current")
             base = self._bm25(q_tokens, aid)
