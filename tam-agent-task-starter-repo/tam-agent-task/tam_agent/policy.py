@@ -38,12 +38,18 @@ PRIORITY_ORDER = ["P4", "P3", "P2", "P1"]
 
 
 def _raise_one_level(p: str, ceiling: str = "P2") -> str:
-    """Raise priority by one level, not exceeding `ceiling` (e.g. P4->P3->P2)."""
+    """Raise priority by one level toward P1, capped at `ceiling` - but NEVER
+    lower an already-higher priority. The account-risk override is an *escalation*
+    rule; it must not downgrade a true P1 outage to P2 just because the account is
+    near renewal. So the result is max(current, min(current+1, ceiling))."""
     if p not in PRIORITY_ORDER:
         return p
     i = PRIORITY_ORDER.index(p)
     cap = PRIORITY_ORDER.index(ceiling)
-    return PRIORITY_ORDER[min(i + 1, cap, len(PRIORITY_ORDER) - 1)]
+    target = min(i + 1, len(PRIORITY_ORDER) - 1)   # one step up
+    target = min(target, cap)                       # not past the ceiling
+    target = max(target, i)                         # but never below where we are
+    return PRIORITY_ORDER[target]
 
 
 def _add_signal(decision: dict, text: str) -> None:

@@ -311,12 +311,39 @@ def triage(ticket: dict, ctx: Context) -> dict:
     evidence_nudges = 0              # evidence guard fires a bounded number of times
     final = None
 
+    def build_evidence(final_obj):
+        """Build the policy-evidence bundle from the deterministic facts gathered
+        so far PLUS any model-final fields. Safe to call on every exit path
+        (provider error, bad JSON, budget exhausted, normal finish) so mandatory
+        policy is always enforced - P0 requirement."""
+        f = final_obj or {}
+        return {
+            "security_flag": data_exposure or bool(f.get("security")),
+            "security_reason": ("Deterministic data-exposure match (KB-6401)."
+                                if data_exposure else f.get("internal_note", "")),
+            "health": health_facts,
+            "duplicate_of": duplicate_of or (f.get("duplicate_of")
+                                             if isinstance(f.get("duplicate_of"), str) else None),
+            "duplicate_original_priority": duplicate_orig_priority,
+            "insufficient_info": bool(f.get("needs_clarification"))
+                                 and not f.get("security") and not data_exposure,
+            "injection_detected": injection,
+            "exact_code_match": exact_code_match,
+            "account_resolved": resolved_id is not None,
+            "execution_incomplete": False,
+        }
+
     for step in range(1, MAX_STEPS + 1):
         try:
             reply = _call_llm(ctx.llm, messages, SYSTEM_PROMPT)
         except LLMError as e:
-            return _finalize(_fallback_decision(ticket, resolved_id, f"LLM error: {e}"),
-                             ticket, {}, trace)
+            # Provider failure: still enforce mandatory policy on the deterministic
+            # evidence we already have (e.g. a flagged data-exposure stays P1).
+            ev = build_evidence(None)
+            ev["execution_incomplete"] = True
+            fb = _fallback_decision(ticket, resolved_id, f"LLM error: {e}")
+            fb["reasoning_trace"] = trace or fb["reasoning_trace"]
+            return _finalize(fb, ticket, ev, trace)
 
         obj = _extract_json(reply)
         if obj is None:
@@ -432,23 +459,14 @@ def triage(ticket: dict, ctx: Context) -> dict:
     # Deterministic evidence gathered during the loop - available even if the
     # model never produced a clean final. The policy layer uses this, so a
     # fallback still honours security / account-risk / duplicate rules.
-    evidence = {
-        "security_flag": data_exposure or bool((final or {}).get("security")),
-        "security_reason": ("Deterministic data-exposure match (KB-6401)."
-                            if data_exposure else (final or {}).get("internal_note", "")),
-        "health": health_facts,
-        "duplicate_of": duplicate_of,
-        "duplicate_original_priority": duplicate_orig_priority,
-        "insufficient_info": bool((final or {}).get("needs_clarification"))
-                             and not (final or {}).get("security") and not data_exposure,
-        "injection_detected": injection,
-        "exact_code_match": exact_code_match,
-        "account_resolved": resolved_id is not None,
-    }
+    evidence = build_evidence(final)
 
     if final is None:
-        # Use a fallback skeleton but run it through the policy layer with the
-        # evidence we DID gather, so e.g. an account-risk override still applies.
+        # Budget exhausted / no clean final: fallback skeleton, but run it through
+        # the policy layer with the evidence we DID gather (e.g. account-risk
+        # override or a flagged data-exposure still applies). Execution is marked
+        # incomplete so the evaluator does not count this as clean success.
+        evidence["execution_incomplete"] = True
         fb = _fallback_decision(ticket, resolved_id, "model did not finalize; using gathered evidence")
         fb["reasoning_trace"] = trace or fb["reasoning_trace"]
         if health_facts:
@@ -476,13 +494,6 @@ def triage(ticket: dict, ctx: Context) -> dict:
         "internal_note": str(final.get("internal_note", "")).strip(),
         "reasoning_trace": trace,
     }
-
-    # refine the shared evidence with the model's final fields now that we have them
-    evidence["security_flag"] = evidence["security_flag"] or bool(final.get("security"))
-    if not evidence["duplicate_of"] and isinstance(final.get("duplicate_of"), str):
-        evidence["duplicate_of"] = final.get("duplicate_of")
-    evidence["insufficient_info"] = (bool(final.get("needs_clarification"))
-                                     and not final.get("security") and not data_exposure)
 
     return _finalize(decision, ticket, evidence, trace)
 
