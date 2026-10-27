@@ -75,6 +75,11 @@ class LLMClient:
         self.provider = (provider or os.getenv("LLM_PROVIDER", "groq")).lower()
         self.model = model or os.getenv("LLM_MODEL") or _DEFAULT_MODELS.get(self.provider, "")
         self.calls = 0  # reported per ticket for cost/latency
+        # token instrumentation (guardrail S3). None where the provider does not
+        # expose counts - we never invent token numbers.
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.last_usage: dict | None = None
 
         # Groq: build a round-robin iterator over all configured keys.
         self._groq_keys: list[str] = []
@@ -87,6 +92,14 @@ class LLMClient:
                     "(or GROQ_API_KEY) in .env. Get a free key at https://console.groq.com"
                 )
             self._groq_cycle = cycle(self._groq_keys)
+
+    # -- usage instrumentation ---------------------------------------------
+    def _record_usage(self, usage: dict | None) -> None:
+        """Accumulate prompt/completion tokens when the provider reports them."""
+        self.last_usage = usage
+        if usage:
+            self.prompt_tokens += int(usage.get("prompt_tokens", 0) or 0)
+            self.completion_tokens += int(usage.get("completion_tokens", 0) or 0)
 
     # -- public API ---------------------------------------------------------
     def chat(self, messages: list[dict], system: str | None = None, max_tokens: int = 1024,
@@ -112,10 +125,14 @@ class LLMClient:
             "max_tokens": max_tokens, "temperature": temperature,
         }).encode()
 
-        # One pass over all keys; on 429/5xx rotate. If all fail, back off and repeat.
-        attempts = max(len(self._groq_keys) * 2, 2)
+        # Groq free tier is limited by TOKENS-PER-MINUTE (not request count), so
+        # when every key is rate-limited the right move is to wait out the ~60s
+        # window, not give up. We rotate keys first (cheap), and only sleep after
+        # a full sweep finds all keys limited. `retry-after` is honoured when sent.
+        n = len(self._groq_keys)
+        attempts = n * 6          # generous: enough to ride out a couple of windows
         last_err = None
-        backoffs = 0
+        sweep_waits = 0
         for i in range(attempts):
             key = next(self._groq_cycle)
             req = urllib.request.Request(url, data=body, headers={
@@ -127,15 +144,17 @@ class LLMClient:
             try:
                 with urllib.request.urlopen(req, timeout=120) as r:
                     data = json.loads(r.read())
+                self._record_usage(data.get("usage"))
                 return data["choices"][0]["message"]["content"] or ""
             except urllib.error.HTTPError as e:
                 last_err = e
                 if e.code == 429:
-                    # rate-limited: rotate to next key immediately
-                    if (i + 1) % len(self._groq_keys) == 0:
-                        # completed a full sweep with every key limited -> brief backoff
-                        backoffs += 1
-                        time.sleep(min(2 ** backoffs, 10))
+                    retry_after = e.headers.get("retry-after")
+                    # rotate to the next key immediately; only wait after a full sweep
+                    if (i + 1) % n == 0:
+                        sweep_waits += 1
+                        wait = float(retry_after) if retry_after else min(5 * sweep_waits, 30)
+                        time.sleep(wait)
                     continue
                 if 500 <= e.code < 600:
                     time.sleep(1)
@@ -184,6 +203,10 @@ class LLMClient:
         msgs = ([{"role": "system", "content": system}] if system else []) + messages
         resp = client.chat.completions.create(model=self.model, messages=msgs,
                                                max_tokens=max_tokens, temperature=temperature)
+        u = getattr(resp, "usage", None)
+        if u is not None:
+            self._record_usage({"prompt_tokens": getattr(u, "prompt_tokens", 0),
+                                "completion_tokens": getattr(u, "completion_tokens", 0)})
         return resp.choices[0].message.content or ""
 
     # -- Anthropic ----------------------------------------------------------

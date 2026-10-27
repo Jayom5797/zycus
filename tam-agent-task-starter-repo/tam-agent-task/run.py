@@ -37,23 +37,43 @@ def main():
     OUT.mkdir(exist_ok=True)
     by_id = tickets.set_index("ticket_id")
     ok = 0
+    tot_prompt = tot_completion = 0
     with open(OUT / "run_log.jsonl", "a") as log:
         for tid in ids:
-            t0, calls0 = time.time(), ctx.llm.calls
+            t0 = time.time()
+            calls0 = ctx.llm.calls
+            pt0, ct0 = ctx.llm.prompt_tokens, ctx.llm.completion_tokens
             rec = {"ticket_id": tid}
             try:
                 ticket = by_id.loc[tid].to_dict() | {"ticket_id": tid}
                 result = triage(ticket, ctx)
                 errs = validate(result)
                 (OUT / f"{tid}.json").write_text(json.dumps(result, indent=2))
-                rec |= {"status": "ok" if not errs else "schema_error", "errors": errs}
+                rec |= {"status": "ok" if not errs else "schema_error", "errors": errs,
+                        "category": result.get("category"), "priority": result.get("priority"),
+                        "route_to": result.get("route_to")}
                 ok += not errs
             except Exception as e:
                 rec |= {"status": "exception", "errors": [repr(e)], "traceback": traceback.format_exc(limit=3)}
-            rec |= {"seconds": round(time.time() - t0, 2), "llm_calls": ctx.llm.calls - calls0}
+            # token usage is captured when the provider reports it (guardrail S3).
+            dp = ctx.llm.prompt_tokens - pt0
+            dc = ctx.llm.completion_tokens - ct0
+            tot_prompt += dp
+            tot_completion += dc
+            rec |= {"seconds": round(time.time() - t0, 2),
+                    "llm_calls": ctx.llm.calls - calls0,
+                    "prompt_tokens": dp, "completion_tokens": dc}
             log.write(json.dumps(rec) + "\n")
-            print(f"{tid}: {rec['status']} ({rec['seconds']}s, {rec['llm_calls']} LLM calls)")
-    print(f"\n{ok}/{len(ids)} tickets produced valid output")
+            print(f"{tid}: {rec['status']} ({rec['seconds']}s, {rec['llm_calls']} calls, "
+                  f"{dp}+{dc} tokens)")
+    n = len(ids)
+    print(f"\n{ok}/{n} tickets produced valid output")
+    if tot_prompt or tot_completion:
+        print(f"Tokens: total {tot_prompt + tot_completion} "
+              f"(prompt {tot_prompt}, completion {tot_completion}); "
+              f"mean/ticket {(tot_prompt + tot_completion) // max(n, 1)}")
+    else:
+        print("Tokens: not reported by this provider.")
 
 
 if __name__ == "__main__":
