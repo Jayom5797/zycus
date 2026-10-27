@@ -21,10 +21,17 @@ Rubric notes (ground truth, with the policy that justifies each):
 """
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "outputs"
+sys.path.insert(0, str(ROOT))
+from tam_agent.schema import validate  # noqa: E402
+
+# The required review tickets, in file order. These must ALL appear in the
+# evaluation (missing output -> not_evaluated, never silently dropped).
+REVIEW = [l.strip() for l in (ROOT / "data" / "review_set.txt").read_text().splitlines() if l.strip()]
 
 # Hand-labelled expectations. Each field maps to either a single value or a set
 # of acceptable values. `account_id` None means "must resolve to this".
@@ -137,35 +144,184 @@ def score_ticket(tid: str, out: dict, spec: dict) -> list[tuple[str, bool, str]]
     return checks
 
 
+# Which checks belong to each dashboard metric family. A check not listed under
+# policy/evidence counts only toward accuracy. Security checks are CRITICAL:
+# a failure there is a critical policy violation that must stay visible.
+POLICY_CHECKS = {"escalate", "notify_tam", "security_handling", "injection_safe", "needs_clarification"}
+EVIDENCE_CHECKS = {"account", "kb_reference", "kb_no_deprecated"}
+CRITICAL_CHECKS = {"security_handling", "injection_safe"}
+
+
+def _actual_expected(out: dict, spec: dict):
+    """Build a per-field expected-vs-actual map for the inspection panel."""
+    def setstr(v):
+        return sorted(v) if isinstance(v, set) else v
+    fields = {}
+    for f in ("account_id", "category", "priority", "route_to", "escalate",
+              "notify_tam", "needs_clarification"):
+        if f in spec:
+            exp = setstr(spec[f])
+            act = out.get(f) if out else None
+            ok = (act in spec[f]) if isinstance(spec[f], set) else (act == spec[f])
+            fields[f] = {"expected": exp, "actual": act, "pass": bool(ok)}
+    return fields
+
+
+def evaluate():
+    """Evaluate the review set into a structured result. Source of truth = RUBRIC
+    + run_log.jsonl. Distinguishes pass / fail / invalid / not_evaluated."""
+    run_log = {}
+    log_path = OUT / "run_log.jsonl"
+    if log_path.exists():
+        for line in log_path.read_text().splitlines():
+            try:
+                r = json.loads(line)
+                run_log[r.get("ticket_id")] = r
+            except json.JSONDecodeError:
+                pass
+
+    tickets = []
+    for tid in REVIEW:
+        spec = RUBRIC.get(tid, {})
+        p = OUT / f"{tid}.json"
+        log = run_log.get(tid, {})
+        entry = {"ticket_id": tid, "why": spec.get("why", ""),
+                 "exec_status": log.get("status"),
+                 "llm_calls": log.get("llm_calls"), "seconds": log.get("seconds"),
+                 "prompt_tokens": log.get("prompt_tokens"),
+                 "completion_tokens": log.get("completion_tokens")}
+
+        if not p.exists():
+            entry.update(status="not_evaluated", checks=[], fields={},
+                         out=None, critical_fail=False)
+            tickets.append(entry)
+            continue
+        try:
+            out = json.loads(p.read_text())
+        except json.JSONDecodeError:
+            entry.update(status="invalid", checks=[], fields={}, out=None,
+                         critical_fail=False)
+            tickets.append(entry)
+            continue
+
+        errs = validate(out)
+        checks = score_ticket(tid, out, spec)
+        chk = [{"name": n, "pass": ok, "detail": d,
+                "family": ("policy" if n in POLICY_CHECKS else
+                           "evidence" if n in EVIDENCE_CHECKS else "accuracy"),
+                "critical": n in CRITICAL_CHECKS} for n, ok, d in checks]
+        critical_fail = any(c["critical"] and not c["pass"] for c in chk)
+        all_pass = all(c["pass"] for c in chk) and not errs
+        status = "invalid" if errs else ("pass" if all_pass else "fail")
+        entry.update(status=status, schema_errors=errs, checks=chk,
+                     fields=_actual_expected(out, spec), critical_fail=critical_fail,
+                     out={k: out.get(k) for k in (
+                         "account_id", "category", "priority", "route_to", "escalate",
+                         "notify_tam", "duplicate_of", "needs_clarification",
+                         "kb_references", "account_signals", "customer_reply",
+                         "internal_note", "confidence", "reasoning_trace")})
+        tickets.append(entry)
+
+    # --- roll up the four metric families from per-ticket checks ------------
+    def family_rate(fam):
+        num = den = 0
+        for t in tickets:
+            if t["status"] in ("not_evaluated",):
+                den += 1  # counted but not satisfied
+                continue
+            fam_checks = [c for c in t["checks"] if c["family"] == fam]
+            if not fam_checks:
+                continue
+            den += 1
+            if all(c["pass"] for c in fam_checks):
+                num += 1
+        return num, den
+
+    evaluated = [t for t in tickets if t["status"] != "not_evaluated"]
+    required = len(REVIEW)
+    accuracy_ok = sum(1 for t in tickets if t["status"] == "pass")
+    policy_num, policy_den = family_rate("policy")
+    evid_num, evid_den = family_rate("evidence")
+    exec_ok = sum(1 for t in tickets if t.get("exec_status") == "ok"
+                  and t["status"] not in ("not_evaluated", "invalid"))
+    critical_fails = [t["ticket_id"] for t in tickets if t.get("critical_fail")]
+
+    has_outputs = any(t["status"] != "not_evaluated" for t in tickets)
+    complete = all(t["status"] != "not_evaluated" for t in tickets)
+    run_status = ("not_run" if not has_outputs else
+                  "incomplete" if not complete else
+                  "failed" if (accuracy_ok < required or critical_fails) else "passed")
+
+    # token/latency totals only if actually recorded
+    secs = [t["seconds"] for t in tickets if isinstance(t.get("seconds"), (int, float))]
+    pt = sum(t["prompt_tokens"] for t in tickets if isinstance(t.get("prompt_tokens"), int))
+    ct = sum(t["completion_tokens"] for t in tickets if isinstance(t.get("completion_tokens"), int))
+    calls = [t["llm_calls"] for t in tickets if isinstance(t.get("llm_calls"), int)]
+
+    return {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "dataset": "review_set.txt",
+        "run_status": run_status,
+        "required_tickets": required,
+        "metrics": {
+            "accuracy": {"num": accuracy_ok, "den": required,
+                         "label": "tickets passing all rubric checks"},
+            "policy": {"num": policy_num, "den": policy_den,
+                       "label": "tickets meeting all mandatory policy checks"},
+            "evidence": {"num": evid_num, "den": evid_den,
+                         "label": "tickets with all required evidence"},
+            "execution": {"num": exec_ok, "den": required,
+                          "label": "tickets completed without exception/fallback"},
+        },
+        "critical_fails": critical_fails,
+        "cost": {
+            "mean_seconds": round(sum(secs) / len(secs), 2) if secs else None,
+            "max_seconds": max(secs) if secs else None,
+            "prompt_tokens": pt or None,
+            "completion_tokens": ct or None,
+            "mean_calls": round(sum(calls) / len(calls), 1) if calls else None,
+            "note": "Token/latency figures are read from run_log.jsonl; cost in USD "
+                    "is not shown because the free-tier model has no fixed price.",
+        },
+        "tickets": tickets,
+    }
+
+
 def main():
+    want_json = "--json" in sys.argv
     if not OUT.exists():
         print("No outputs/ yet. Run: python run.py --set review")
         return 1
-    total = passed = 0
-    per_ticket = []
-    for tid, spec in RUBRIC.items():
-        p = OUT / f"{tid}.json"
-        if not p.exists():
-            print(f"[MISSING] {tid}")
-            continue
-        out = json.loads(p.read_text())
-        checks = score_ticket(tid, out, spec)
-        tp = sum(1 for _, ok, _ in checks if ok)
-        tt = len(checks)
-        total += tt
-        passed += tp
-        per_ticket.append((tid, tp, tt, checks, spec.get("why", "")))
+    result = evaluate()
 
+    if want_json:
+        dest = OUT / "evaluation.json"
+        dest.write_text(json.dumps(result, indent=2), encoding="utf-8")
+        print(f"Wrote {dest} (run_status={result['run_status']})")
+        return 0
+
+    # human-readable console report
     print("=" * 72)
-    for tid, tp, tt, checks, why in per_ticket:
-        flag = "OK " if tp == tt else "!! "
-        print(f"[{flag}] {tid}  {tp}/{tt}   ({why})")
-        for name, ok, detail in checks:
-            if not ok:
-                print(f"        FAIL {name}: {detail}")
+    passed = total = 0
+    for t in result["tickets"]:
+        tp = sum(1 for c in t["checks"] if c["pass"])
+        tt = len(t["checks"])
+        passed += tp
+        total += tt
+        tag = {"pass": "OK ", "fail": "!! ", "invalid": "XX ",
+               "not_evaluated": "-- "}[t["status"]]
+        print(f"[{tag}] {t['ticket_id']}  {tp}/{tt}  {t['status']}   ({t['why']})")
+        for c in t["checks"]:
+            if not c["pass"]:
+                crit = " CRITICAL" if c["critical"] else ""
+                print(f"        FAIL{crit} {c['name']}: {c['detail']}")
     print("=" * 72)
-    pct = (100 * passed / total) if total else 0
-    print(f"Decision accuracy: {passed}/{total} checks passed ({pct:.0f}%)")
+    m = result["metrics"]
+    print(f"Run status: {result['run_status'].upper()}")
+    print(f"Accuracy (tickets): {m['accuracy']['num']}/{m['accuracy']['den']}")
+    print(f"Decision checks: {passed}/{total} ({(100*passed/total) if total else 0:.0f}%)")
+    if result["critical_fails"]:
+        print(f"CRITICAL policy failures: {result['critical_fails']}")
     return 0
 
 

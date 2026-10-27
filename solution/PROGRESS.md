@@ -43,7 +43,23 @@ serve; verified live). Multi-key round-robin; Ollama offline fallback intact.
 | 7 | Review run → outputs + `run_log.jsonl` | ✅ DONE | **10/10 valid** (`check_outputs.py`). Outputs + run_log committed. |
 | 8 | Eval harness (`scripts/eval.py`) | ✅ DONE | **37/37 checks (100%)** on the review set. Rubric separate from agent; ground truth verified. |
 | 9 | `SOLUTION.md` (1 page) | ✅ DONE | Design, evaluation, 10x scale, limitations, how-to — with real measured numbers. |
-| 10 | *(uplift)* Trace viewer UI | ⬜ OPTIONAL | Not required by the brief; a walkthrough aid, built only after 10/10. |
+| 10 | *(uplift)* Evaluation dashboard | ✅ DONE | `outputs/dashboard.html` — presentation layer over `evaluation.json`. Not required by brief; a reviewer/walkthrough aid. |
+
+## Evaluation dashboard (uplift)
+
+`scripts/eval.py --json` emits `outputs/evaluation.json` (the single source of truth);
+`scripts/build_dashboard.py` renders a self-contained `outputs/dashboard.html` (no server,
+no deps, double-click to open). Shows run status, four metric cards (accuracy, policy
+compliance, evidence coverage, execution reliability), an expected-vs-actual ticket table,
+a per-ticket inspection panel (decision, diffs, evidence, execution trace), and a
+reliability/cost strip read from `run_log.jsonl`.
+
+**Data-integrity verified (edge cases tested on copies, real outputs untouched):**
+- missing output -> `not_evaluated` (never `pass`); run_status becomes `incomplete`
+- malformed output -> `invalid`
+- broken security ticket -> `fail` and listed in `critical_fails` (stays visible)
+- accuracy correctly dropped 10/10 -> 7/10 under those failures; all 10 tickets always shown
+- ticket text is HTML-escaped before rendering; metrics are read from the artifact, not hardcoded
 
 ---
 
