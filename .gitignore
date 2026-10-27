@@ -1,0 +1,29 @@
+# === Secrets / local config (never commit) ===
+.env
+*.env
+!.env.example
+
+# === Task brief & handout artifacts (not part of the submission) ===
+TAM_Intern_Task_Brief.pdf
+TAM_Intern_Task_Brief.docx
+*.docx
+*.zip
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# === Editor / OS ===
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
