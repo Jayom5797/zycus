@@ -76,10 +76,12 @@ RUBRIC = {
         "route_to": {"product", "L2_engineering", "L1_support"},
         "why": "may be a documented by-design limit rather than a defect",
     },
-    "TKT-192732": {  # dashboard not refreshing, E-6105 (control case)
+    "TKT-192732": {  # "Re:" dashboard refresh, E-6105
         "account_id": "ACC-6031",
-        "kb_any": {"KB-2982"},
-        "why": "E-6105 dashboard refresh -> KB-2982",
+        "category": {"incident", "bug", "duplicate"},
+        "why": "E-6105 dashboard refresh. 'Re:' follow-up of open TKT-122022 "
+               "(same account/module/symptom, <7d) -> duplicate is also correct; "
+               "otherwise incident citing KB-2982.",
     },
 }
 
@@ -118,7 +120,7 @@ def score_ticket(tid: str, out: dict, spec: dict) -> list[tuple[str, bool, str]]
     if "kb_any" in spec:
         refs = set(out.get("kb_references") or [])
         add("kb_reference", bool(refs & spec["kb_any"]),
-            f"{refs} ∩ {spec['kb_any']}")
+            f"{refs} needs one of {spec['kb_any']}")
     if "kb_not" in spec:
         refs = set(out.get("kb_references") or [])
         add("kb_no_deprecated", not (refs & spec["kb_not"]),

@@ -103,11 +103,15 @@ class LLMClient:
 
     # -- public API ---------------------------------------------------------
     def chat(self, messages: list[dict], system: str | None = None, max_tokens: int = 1024,
-             temperature: float = 0.0) -> str:
-        """messages: [{"role": "user"|"assistant", "content": str}] -> assistant text."""
+             temperature: float = 0.0, reasoning_effort: str | None = None) -> str:
+        """messages: [{"role": "user"|"assistant", "content": str}] -> assistant text.
+
+        reasoning_effort ("low"|"medium"|"high") applies to Groq's gpt-oss models:
+        "low" sharply cuts hidden reasoning tokens, which makes content reliable
+        and calls cheaper. Ignored by providers that don't support it."""
         self.calls += 1
         if self.provider == "groq":
-            return self._chat_groq(messages, system, max_tokens, temperature)
+            return self._chat_groq(messages, system, max_tokens, temperature, reasoning_effort)
         if self.provider == "ollama":
             return self._chat_ollama(messages, system, max_tokens, temperature)
         if self.provider == "openai":
@@ -117,13 +121,17 @@ class LLMClient:
         raise LLMError(f"Unknown LLM_PROVIDER: {self.provider!r}. Use groq|ollama|openai|anthropic.")
 
     # -- Groq (OpenAI-compatible) with round-robin --------------------------
-    def _chat_groq(self, messages, system, max_tokens, temperature) -> str:
+    def _chat_groq(self, messages, system, max_tokens, temperature,
+                   reasoning_effort=None) -> str:
         url = "https://api.groq.com/openai/v1/chat/completions"
         msgs = ([{"role": "system", "content": system}] if system else []) + messages
-        body = json.dumps({
+        payload = {
             "model": self.model, "messages": msgs,
             "max_tokens": max_tokens, "temperature": temperature,
-        }).encode()
+        }
+        if reasoning_effort:
+            payload["reasoning_effort"] = reasoning_effort
+        body = json.dumps(payload).encode()
 
         # Groq free tier is limited by TOKENS-PER-MINUTE (not request count), so
         # when every key is rate-limited the right move is to wait out the ~60s
@@ -161,12 +169,12 @@ class LLMClient:
                     continue
                 detail = e.read().decode(errors="ignore")[:300]
                 raise LLMError(f"Groq HTTP {e.code}: {detail}") from e
-            except urllib.error.URLError as e:
+            except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as e:
+                # Transient network drop (e.g. WinError 10054 connection reset):
+                # rotate to the next key and retry rather than crashing the run.
                 last_err = e
-                raise LLMError(
-                    f"Cannot reach Groq ({e.reason}). Check your network, or switch "
-                    f"LLM_PROVIDER=ollama in .env for offline use."
-                ) from e
+                time.sleep(1)
+                continue
         raise LLMError(
             f"All {len(self._groq_keys)} Groq key(s) exhausted or rate-limited after "
             f"{attempts} attempts. Add more keys to GROQ_API_KEYS in .env. Last error: {last_err}"

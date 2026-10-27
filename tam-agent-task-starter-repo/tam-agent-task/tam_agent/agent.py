@@ -23,7 +23,10 @@ bodies are not resent.
 from __future__ import annotations
 
 import json
+import os
 import re
+
+_DEBUG = bool(os.getenv("AGENT_DEBUG"))  # set AGENT_DEBUG=1 to print tool calls
 
 from .llm import LLMClient, LLMError
 from .policy import apply_policy
@@ -31,7 +34,7 @@ from .retrieval import extract_error_codes, normalize_module
 from .schema import CATEGORIES, PRIORITIES, ROUTES
 from .tools import Tools
 
-MAX_STEPS = 8              # hard execution budget per ticket
+MAX_STEPS = 12             # hard execution budget per ticket
 # gpt-oss is a reasoning model: it spends tokens on a hidden `reasoning` field
 # before emitting `content`. Below ~4k it sometimes finishes after reasoning with
 # EMPTY content. We call at this budget and, if content is still empty, retry once
@@ -63,9 +66,19 @@ You decide, for ONE ticket, the correct category, priority, routing, escalation,
 notification, duplicate status, and whether clarification is needed, then draft a short
 customer reply and internal note.
 
-Work like a senior support engineer: do NOT decide from ticket text alone. Resolve the
-account, check account health and history, retrieve the relevant KB article(s) including
-policy, then decide. Gather only the evidence you need, then stop.
+Work like a senior support engineer: do NOT decide from ticket text alone.
+
+Before you finalize, you MUST have gathered this evidence (via tools, not assumption):
+  1. get_policy() - always first.
+  2. resolve_account(...) - always, to get the account_id, tier and renewal date.
+  3. get_account_health(account_id) - always, to check renewal window / usage / escalations
+     (this drives the account-risk override).
+  4. search_kb(...) - whenever the ticket names an error code, module or concrete symptom,
+     to find the supporting article. Then get_kb_article(...) to confirm the fix or follow a
+     related/superseded_by link. Only skip KB search if the ticket genuinely has no symptom
+     (e.g. "nothing works" with no detail) or is pure data-exposure.
+You may call more tools if you still lack evidence. Do NOT finalize after only get_policy.
+kb_references MUST be real IDs returned by your tool calls - never invent an ID.
 
 {TOOLS_SPEC}
 
@@ -101,6 +114,28 @@ def detect_injection(text: str) -> bool:
     return any(re.search(p, low) for p in _INJECTION_PATTERNS)
 
 
+# Data-exposure (KB-6401) is a mandatory P1 security case regardless of the
+# customer's tone ("probably a display thing"). Tone must never downgrade it, so
+# we detect it deterministically from the SYMPTOM, not the model's judgement.
+# Pattern: one party able to SEE another party's confidential data.
+_EXPOSURE_SUBJECTS = r"(competitor|another supplier|other suppliers?|competing supplier|" \
+                     r"other tenant|another tenant|other customer|another company|someone else)"
+_EXPOSURE_OBJECTS = r"(bid|bids|bid amount|price|prices|pricing|invoice|invoices|contract|" \
+                    r"contracts|bank|personal data|pii|confidential|data they should not)"
+_EXPOSURE_VERBS = r"(see|saw|seeing|view|viewed|visible|access|exposed|showed|shown|read)"
+
+
+def detect_data_exposure(text: str) -> bool:
+    """True if the ticket describes one party seeing another's confidential data."""
+    low = re.sub(r"\s+", " ", (text or "").lower())
+    has_subject = re.search(_EXPOSURE_SUBJECTS, low) is not None
+    has_object = re.search(_EXPOSURE_OBJECTS, low) is not None
+    has_verb = re.search(_EXPOSURE_VERBS, low) is not None
+    # Require a cross-party subject + a sensitive object + a seeing/access verb,
+    # OR the explicit policy phrase. Keeps false positives low.
+    return (has_subject and has_object and has_verb) or ("data they should not" in low)
+
+
 def _call_llm(llm: LLMClient, messages: list[dict], system: str) -> str:
     """One model turn, resilient to the reasoning model's empty-content quirk.
 
@@ -108,13 +143,15 @@ def _call_llm(llm: LLMClient, messages: list[dict], system: str) -> str:
     empty `content` (finish_reason=stop). When that happens we retry once with a
     larger budget and a nudge to answer now. This keeps a single step from being
     wasted on an empty reply (the main cause of loop stalls)."""
-    reply = llm.chat(messages, system=system, max_tokens=MAX_TOKENS_PER_CALL)
+    reply = llm.chat(messages, system=system, max_tokens=MAX_TOKENS_PER_CALL,
+                     reasoning_effort="low")
     if reply.strip():
         return reply
     nudged = messages + [{"role": "user",
                           "content": "Output the single JSON object now (tool call or final). "
                                      "Do not think further."}]
-    return llm.chat(nudged, system=system, max_tokens=MAX_TOKENS_RETRY)
+    return llm.chat(nudged, system=system, max_tokens=MAX_TOKENS_RETRY,
+                    reasoning_effort="low")
 
 
 def _extract_json(text: str) -> dict | None:
@@ -239,7 +276,9 @@ def triage(ticket: dict, ctx: Context) -> dict:
     tools.seen_kb = set()  # reset per-ticket de-dup tracking
 
     # Deterministic pre-facts (computed, not model-guessed).
-    injection = detect_injection(f"{ticket.get('subject','')} {ticket.get('description','')}")
+    ticket_text = f"{ticket.get('subject','')} {ticket.get('description','')}"
+    injection = detect_injection(ticket_text)
+    data_exposure = detect_data_exposure(ticket_text)
     ticket_code = (ticket.get("error_code") or "").strip() or \
         (extract_error_codes(f"{ticket.get('subject','')} {ticket.get('description','')}")[:1] or [None])[0]
 
@@ -268,6 +307,8 @@ def triage(ticket: dict, ctx: Context) -> dict:
     duplicate_of = None
     duplicate_orig_priority = None
     exact_code_match = False
+    retrieved_kb: set[str] = set()   # KB ids the agent actually saw (anti-hallucination)
+    evidence_nudges = 0              # evidence guard fires a bounded number of times
     final = None
 
     for step in range(1, MAX_STEPS + 1):
@@ -287,6 +328,35 @@ def triage(ticket: dict, ctx: Context) -> dict:
 
         # --- finish ---
         if "final" in obj and isinstance(obj["final"], dict):
+            proposed = obj["final"]
+            # Evidence guard: don't let the model finalize before it has resolved
+            # the account, checked health, and (for coded tickets) searched the KB.
+            # We nudge a bounded number of times; the model still chooses the call,
+            # we never fabricate the evidence.
+            called = {s["action"] for s in trace}
+            missing = []
+            if "resolve_account" not in called and resolved_id is None:
+                missing.append("resolve_account")
+            if "get_account_health" not in called:
+                missing.append("get_account_health(account_id) for the renewal/usage risk check")
+            # If the ticket names an error code, the agent must look up the KB
+            # before it can cite a supporting article. Skip this only when there
+            # is no code/symptom (needs_info) or it is a data-exposure case.
+            if (ticket_code and "search_kb" not in called
+                    and not proposed.get("needs_clarification")
+                    and not proposed.get("security") and not data_exposure):
+                missing.append(f"search_kb(error_code={ticket_code}) to find the supporting article")
+            if missing and evidence_nudges < 3:
+                evidence_nudges += 1
+                messages.append({"role": "assistant", "content": _compact(obj, 200)})
+                messages.append({"role": "user",
+                                 "content": "Before finalizing you still need: "
+                                            + "; ".join(missing)
+                                            + ". Call the next tool now."})
+                trace.append({"step": step, "action": "evidence_guard",
+                              "observation": "Deferred finalize; still missing "
+                                             + ", ".join(missing) + "."})
+                continue
             final = obj["final"]
             trace.append({"step": step, "action": "finalize",
                           "observation": obj.get("thought", "Model produced final decision.")})
@@ -318,11 +388,13 @@ def triage(ticket: dict, ctx: Context) -> dict:
                     break
         if name == "search_kb":
             for r in result.get("results", []):
+                retrieved_kb.add(r.get("id"))
                 if ticket_code and ticket_code.upper() in [c.upper() for c in r.get("error_codes", [])]:
                     exact_code_match = True
+        if name == "get_kb_article" and result.get("found"):
+            retrieved_kb.add(result.get("id"))
 
-        import os
-        if os.getenv("AGENT_DEBUG"):
+        if _DEBUG:
             print(f"  [step {step}] tool={name} args={args}")
         trace.append({"step": step, "action": name,
                       "input": _compact(args, 300),
@@ -334,14 +406,54 @@ def triage(ticket: dict, ctx: Context) -> dict:
         # are preserved in reasoning_trace, not resent to the model.
         if len(messages) > 7:
             messages = messages[:1] + messages[-6:]
+
+        # One step before the budget runs out, force a decision so we keep the
+        # evidence already gathered instead of discarding it to a needs_info
+        # fallback. The model must finalize now; no more tools.
+        if step == MAX_STEPS - 1 and final is None:
+            messages.append({"role": "user",
+                             "content": "You must now output your FINAL decision JSON "
+                                        '({"thought":...,"final":{...}}) using the evidence '
+                                        "gathered so far. Do not call any more tools."})
+            try:
+                forced = _extract_json(_call_llm(ctx.llm, messages, SYSTEM_PROMPT))
+            except LLMError:
+                forced = None
+            if forced and isinstance(forced.get("final"), dict):
+                final = forced["final"]
+                trace.append({"step": step + 1, "action": "finalize_forced",
+                              "observation": "Budget nearly exhausted; finalized with "
+                                             "evidence gathered."})
+            break
     else:
         # budget exhausted without a final decision
-        return _finalize(_fallback_decision(ticket, resolved_id, "step budget exhausted"),
-                         ticket, {}, trace)
+        final = None  # fall through to the evidence-aware fallback below
+
+    # Deterministic evidence gathered during the loop - available even if the
+    # model never produced a clean final. The policy layer uses this, so a
+    # fallback still honours security / account-risk / duplicate rules.
+    evidence = {
+        "security_flag": data_exposure or bool((final or {}).get("security")),
+        "security_reason": ("Deterministic data-exposure match (KB-6401)."
+                            if data_exposure else (final or {}).get("internal_note", "")),
+        "health": health_facts,
+        "duplicate_of": duplicate_of,
+        "duplicate_original_priority": duplicate_orig_priority,
+        "insufficient_info": bool((final or {}).get("needs_clarification"))
+                             and not (final or {}).get("security") and not data_exposure,
+        "injection_detected": injection,
+        "exact_code_match": exact_code_match,
+        "account_resolved": resolved_id is not None,
+    }
 
     if final is None:
-        return _finalize(_fallback_decision(ticket, resolved_id, "no final decision"),
-                         ticket, {}, trace)
+        # Use a fallback skeleton but run it through the policy layer with the
+        # evidence we DID gather, so e.g. an account-risk override still applies.
+        fb = _fallback_decision(ticket, resolved_id, "model did not finalize; using gathered evidence")
+        fb["reasoning_trace"] = trace or fb["reasoning_trace"]
+        if health_facts:
+            fb["category"] = "needs_info"  # we lack the model's category; stay conservative
+        return _finalize(fb, ticket, evidence, trace)
 
     # --- assemble the decision from the model's final + deterministic facts ---
     decision = {
@@ -354,25 +466,23 @@ def triage(ticket: dict, ctx: Context) -> dict:
         "notify_tam": bool(final.get("notify_tam", False)),
         "duplicate_of": final.get("duplicate_of"),
         "needs_clarification": bool(final.get("needs_clarification", False)),
-        "kb_references": [k for k in (final.get("kb_references") or []) if isinstance(k, str)],
+        # Anti-hallucination (S4): only keep KB ids the agent actually retrieved
+        # AND that exist in the index. Invented ids like "KB-2024-112" are dropped.
+        "kb_references": [k for k in (final.get("kb_references") or [])
+                          if isinstance(k, str) and k in retrieved_kb
+                          and ctx.tools.index.get(k) is not None],
         "account_signals": [s for s in (final.get("account_signals") or []) if isinstance(s, str)],
         "customer_reply": str(final.get("customer_reply", "")).strip(),
         "internal_note": str(final.get("internal_note", "")).strip(),
         "reasoning_trace": trace,
     }
 
-    # evidence bundle for the deterministic policy layer
-    evidence = {
-        "security_flag": bool(final.get("security")),
-        "security_reason": final.get("internal_note", ""),
-        "health": health_facts,
-        "duplicate_of": duplicate_of or (final.get("duplicate_of") if isinstance(final.get("duplicate_of"), str) else None),
-        "duplicate_original_priority": duplicate_orig_priority,
-        "insufficient_info": bool(final.get("needs_clarification")) and not final.get("security"),
-        "injection_detected": injection,
-        "exact_code_match": exact_code_match,
-        "account_resolved": resolved_id is not None,
-    }
+    # refine the shared evidence with the model's final fields now that we have them
+    evidence["security_flag"] = evidence["security_flag"] or bool(final.get("security"))
+    if not evidence["duplicate_of"] and isinstance(final.get("duplicate_of"), str):
+        evidence["duplicate_of"] = final.get("duplicate_of")
+    evidence["insufficient_info"] = (bool(final.get("needs_clarification"))
+                                     and not final.get("security") and not data_exposure)
 
     return _finalize(decision, ticket, evidence, trace)
 

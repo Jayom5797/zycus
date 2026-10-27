@@ -84,12 +84,26 @@ def apply_policy(decision: dict, evidence: dict) -> dict:
         decision["priority"] = "P1"
         decision["route_to"] = "security"
         decision["escalate"] = True
+        decision["notify_tam"] = True
         reason = evidence.get("security_reason", "Suspected data exposure.")
         _add_signal(decision, "Security/data-exposure report")
+        # KB-6401 mandates the reply content: acknowledge receipt, say Security is
+        # engaged, do NOT speculate on cause/scope, advise pausing an affected
+        # sourcing event. Overwrite any reassuring "no action needed" draft.
+        decision["customer_reply"] = (
+            "Thank you for reporting this. We are treating it as a priority security "
+            "matter and our Security team is engaged and investigating. We will not "
+            "speculate on the cause or scope until they confirm their findings. If this "
+            "relates to an active sourcing event, we recommend pausing that event until "
+            "the Security team confirms containment. We will keep you updated.")
+        decision["internal_note"] = (
+            "Potential data exposure between suppliers/tenants. Per KB-6401: classified "
+            "Security/P1, routed to Security, escalated, TAM notified. Do not reproduce in "
+            "the customer tenant. " + (reason or ""))
         if before != ("security", "P1", "security"):
             _trace(decision, "enforce_security_policy",
                    f"Data-exposure report -> category=security, P1, route=security, "
-                   f"escalate=true (was {before}). Reason: {reason}", "KB-6401")
+                   f"escalate=true, notify_tam=true (was {before}). Reason: {reason}", "KB-6401")
 
     # --- 5. Untrusted ticket content / injection (KB-2914) -----------------
     # Priority/routing never come from ticket text; we only record the attempt.
@@ -157,5 +171,14 @@ def apply_policy(decision: dict, evidence: dict) -> dict:
             _trace(decision, "enforce_account_risk_override",
                    f"Renewal <90d AND ({'; '.join(why)}) -> notify_tam=true "
                    f"(priority already at/above cap).", "KB-2914")
+
+    # --- escalate flag consistency (KB-2914) -------------------------------
+    # "Set escalate = true for P1, security reports, and account risk overrides."
+    # A duplicate keeps the original handling and is not re-escalated.
+    if decision.get("priority") == "P1" and decision.get("category") != "duplicate" \
+            and not decision.get("escalate"):
+        decision["escalate"] = True
+        _trace(decision, "enforce_escalate_for_p1",
+               "P1 ticket -> escalate=true per escalation policy.", "KB-2914")
 
     return decision
