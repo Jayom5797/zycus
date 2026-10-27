@@ -39,9 +39,9 @@ serve; verified live). Multi-key round-robin; Ollama offline fallback intact.
 | 3 | Retrieval (`retrieval.py`) | ✅ DONE | Scalable KB search; the heart of "retrieval accuracy" (20%). Verified. |
 | 4 | Tools (`tools.py`) | ✅ DONE | Deterministic account/usage/duplicate facts; the agent's only data access. Verified. |
 | 5 | Policy (`policy.py`) | ✅ DONE | Mandatory rules enforced + audit-traced; the correctness edge. Unit-tested. |
-| 6 | Agent loop (`agent.py`) | ⏳ IN PROGRESS | The agentic core (30%): model picks tools, decides when to stop. |
-| 7 | Review run → outputs + `run_log.jsonl` | ⬜ PENDING | Hard gate: `check_outputs.py` must show **10/10 valid**. |
-| 8 | Eval harness (`scripts/eval.py`) | ⬜ PENDING | Proves *semantic* correctness with numbers, not just schema validity. |
+| 6 | Agent loop (`agent.py`) | ✅ DONE (needs live run) | The agentic core (30%): model picks tools, decides when to stop. Written, imports clean, JSON/injection unit-checked. |
+| 7 | Review run → outputs + `run_log.jsonl` | ⏳ BLOCKED on keys | Hard gate: `check_outputs.py` must show **10/10 valid**. Blocked only by Groq TPM; awaiting 5 independent-account keys. |
+| 8 | Eval harness (`scripts/eval.py`) | ✅ DONE | Proves *semantic* correctness with numbers. Rubric ground truth (all 10 account mappings) verified against data. |
 | 9 | `SOLUTION.md` (1 page) | ⬜ PENDING | 20% of score: design, evaluation, 10x scale, limits, how to run. |
 | 10 | *(uplift)* Trace viewer UI | ⬜ OPTIONAL | Not required by the brief; a walkthrough aid, built only after 10/10. |
 
@@ -114,8 +114,20 @@ hardcoded into decision logic.*
 
 ---
 
+## Known constraint (being resolved)
+
+The free Groq tier serves a *reasoning* model (`gpt-oss-120b`) under an **8,000
+tokens-per-minute** cap *per account*. A multi-turn agentic loop needs many
+reliable calls; at the budget this model needs (~4k tokens/call to avoid empty
+"reasoning-only" replies), 2 keys from ONE account (shared 8k bucket) throttle
+almost immediately. Fix in flight: add 5 keys from 5 *distinct* accounts =>
+5 x 8k = 40k TPM, enough to run all 10 tickets smoothly. Round-robin client
+already scales to any N keys. Reliability fixes landed: larger budget +
+empty-reply retry, 429 backoff honouring retry-after, capped message history.
+
 ## Next action
 
-Implement `tam_agent/agent.py`: a model-driven tool-calling loop with a hard step
-budget, tool-argument validation, error recovery, token-usage instrumentation,
-and a safe fallback — then run the review set and drive `check_outputs.py` to 10/10.
+As soon as the independent-account keys are in `.env`, run:
+`python scripts/validate_data.py` -> `python run.py --set review`
+-> `python scripts/check_outputs.py` (target 10/10) -> `python scripts/eval.py`
+(decision accuracy), then write `SOLUTION.md`.
