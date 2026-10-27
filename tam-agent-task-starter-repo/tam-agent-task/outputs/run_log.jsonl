@@ -1,0 +1,10 @@
+{"ticket_id": "TKT-144939", "status": "ok", "errors": [], "category": "incident", "priority": "P1", "route_to": "L2_engineering", "seconds": 6.97, "llm_calls": 9, "prompt_tokens": 14067, "completion_tokens": 897}
+{"ticket_id": "TKT-119877", "status": "ok", "errors": [], "category": "how_to", "priority": "P2", "route_to": "L1_support", "seconds": 7.95, "llm_calls": 8, "prompt_tokens": 10281, "completion_tokens": 945}
+{"ticket_id": "TKT-160477", "status": "ok", "errors": [], "category": "incident", "priority": "P3", "route_to": "L1_support", "seconds": 5.94, "llm_calls": 8, "prompt_tokens": 11356, "completion_tokens": 1156}
+{"ticket_id": "TKT-192732", "status": "ok", "errors": [], "category": "incident", "priority": "P2", "route_to": "L2_engineering", "seconds": 6.07, "llm_calls": 7, "prompt_tokens": 9367, "completion_tokens": 1040}
+{"ticket_id": "TKT-169327", "status": "ok", "errors": [], "category": "incident", "priority": "P3", "route_to": "L2_engineering", "seconds": 15.64, "llm_calls": 14, "prompt_tokens": 20846, "completion_tokens": 2849}
+{"ticket_id": "TKT-160067", "status": "ok", "errors": [], "category": "incident", "priority": "P2", "route_to": "L2_engineering", "seconds": 4.86, "llm_calls": 5, "prompt_tokens": 7127, "completion_tokens": 689}
+{"ticket_id": "TKT-160094", "status": "ok", "errors": [], "category": "incident", "priority": "P2", "route_to": "L2_engineering", "seconds": 7.6, "llm_calls": 7, "prompt_tokens": 10594, "completion_tokens": 1110}
+{"ticket_id": "TKT-128253", "status": "ok", "errors": [], "category": "needs_info", "priority": "P3", "route_to": "L1_support", "seconds": 5.59, "llm_calls": 6, "prompt_tokens": 7009, "completion_tokens": 637}
+{"ticket_id": "TKT-135081", "status": "ok", "errors": [], "category": "security", "priority": "P1", "route_to": "security", "seconds": 15.61, "llm_calls": 20, "prompt_tokens": 24330, "completion_tokens": 1416}
+{"ticket_id": "TKT-158764", "status": "ok", "errors": [], "category": "how_to", "priority": "P4", "route_to": "L1_support", "seconds": 3.93, "llm_calls": 5, "prompt_tokens": 6179, "completion_tokens": 635}

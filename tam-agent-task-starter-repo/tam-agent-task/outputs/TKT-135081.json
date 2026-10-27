@@ -1,0 +1,45 @@
+{
+  "ticket_id": "TKT-135081",
+  "account_id": "ACC-7533",
+  "category": "security",
+  "priority": "P1",
+  "route_to": "security",
+  "escalate": true,
+  "notify_tam": true,
+  "duplicate_of": null,
+  "needs_clarification": false,
+  "kb_references": [],
+  "account_signals": [
+    "Enterprise tier",
+    "Renewal in >90 days",
+    "Active users stable",
+    "Security/data-exposure report"
+  ],
+  "customer_reply": "Thank you for reporting this. We are treating it as a priority security matter and our Security team is engaged and investigating. We will not speculate on the cause or scope until they confirm their findings. If this relates to an active sourcing event, we recommend pausing that event until the Security team confirms containment. We will keep you updated.",
+  "internal_note": "Potential data exposure between suppliers/tenants. Per KB-6401: classified Security/P1, routed to Security, escalated, TAM notified. Do not reproduce in the customer tenant. Deterministic data-exposure match (KB-6401).",
+  "reasoning_trace": [
+    {
+      "step": 1,
+      "action": "evidence_guard",
+      "observation": "Deferred finalize; still missing get_account_health(account_id) for the renewal/usage risk check."
+    },
+    {
+      "step": 2,
+      "action": "get_account_health",
+      "input": "{\"account_id\": \"ACC-7533\"}",
+      "observation": "{\"found\": true, \"account_id\": \"ACC-7533\", \"tier\": \"Enterprise\", \"renewal_date\": \"2027-08-24\", \"days_to_renewal\": 308, \"within_90d_renewal\": false, \"active_user_change_pct_3m\": -1.9, \"usage_decline_gt_25pct_3m\": false, \"open_escalations\": 0, \"recent_months\": [\"2026-08\", \"2026-09\", \"2026-10\"], \"recent_active_users\": [475, 457, 461]}"
+    },
+    {
+      "step": 3,
+      "action": "finalize",
+      "observation": "Based on policy, account health, and no security exposure, this is a non\u2011urgent info ticket; no duplicate found; no escalation; no TAM needed."
+    },
+    {
+      "step": 4,
+      "action": "enforce_security_policy",
+      "observation": "Data-exposure report -> category=security, P1, route=security, escalate=true, notify_tam=true (was ('how_to', 'P4', 'L1_support')). Reason: Deterministic data-exposure match (KB-6401).",
+      "policy_source": "KB-6401"
+    }
+  ],
+  "confidence": 0.95
+}

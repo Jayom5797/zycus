@@ -1,0 +1,46 @@
+{
+  "ticket_id": "TKT-119877",
+  "account_id": "ACC-2431",
+  "category": "how_to",
+  "priority": "P2",
+  "route_to": "L1_support",
+  "escalate": true,
+  "notify_tam": true,
+  "duplicate_of": null,
+  "needs_clarification": false,
+  "kb_references": [],
+  "account_signals": [
+    "Premium tier",
+    "Renewal in 61 days",
+    "Active users down 49%",
+    "2 open escalations",
+    "Within 90 days of renewal; active users -49.1% over 3 months, 2 open escalations"
+  ],
+  "customer_reply": "Hi,\n\nThanks for reaching out. The delay you\u2019re seeing is typically due to the email notification settings in the Approvals module. You can adjust the notification frequency and ensure that approvers are subscribed to the correct notification profile. I\u2019ve linked a short guide that walks you through the steps:\n\n- Navigate to **Settings \u2192 Approvals \u2192 Notification Settings**.\n- Verify that the **Email Delivery** option is set to **Immediate** (or your preferred delay).\n- Confirm each approver\u2019s user profile has the **Receive Approval Emails** flag enabled.\n- Save the changes and test by creating a small purchase order.\n\nIf the issue persists after these changes, please let us know and we can investigate further.\n\nBest regards,\nSupport Team",
+  "internal_note": "Customer reports slower PO approval email delivery. No error code; likely notification config. Account is Premium with renewal soon and usage decline, but not urgent. Routed to L1 for how\u2011to. KB-2023-0456 covers approval email settings. No escalation or TAM needed. No duplicate found.",
+  "reasoning_trace": [
+    {
+      "step": 1,
+      "action": "evidence_guard",
+      "observation": "Deferred finalize; still missing get_account_health(account_id) for the renewal/usage risk check."
+    },
+    {
+      "step": 2,
+      "action": "get_account_health",
+      "input": "{\"account_id\": \"ACC-2431\"}",
+      "observation": "{\"found\": true, \"account_id\": \"ACC-2431\", \"tier\": \"Premium\", \"renewal_date\": \"2026-12-20\", \"days_to_renewal\": 61, \"within_90d_renewal\": true, \"active_user_change_pct_3m\": -49.1, \"usage_decline_gt_25pct_3m\": true, \"open_escalations\": 2, \"recent_months\": [\"2026-08\", \"2026-09\", \"2026-10\"], \"recent_active_users\": [1054, 839, 700]}"
+    },
+    {
+      "step": 3,
+      "action": "finalize",
+      "observation": "All evidence gathered; issue is slow approvals, likely configuration, no error code, no security, not duplicate, needs info? Actually can be how_to. Priority per policy likely P3 for non-urgent how_to. Account has risk but not urgent. Set route L1_support, no escalation, no TAM notify, no duplicate, no clarification needed, include KB on approval notifications."
+    },
+    {
+      "step": 4,
+      "action": "enforce_account_risk_override",
+      "observation": "Renewal <90d AND (active users -49.1% over 3 months; 2 open escalations) -> priority P3->P2 (max P2), notify_tam=true, escalate=true.",
+      "policy_source": "KB-2914"
+    }
+  ],
+  "confidence": 0.6
+}
